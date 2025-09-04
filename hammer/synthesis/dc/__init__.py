@@ -5,7 +5,10 @@
 #
 #  See LICENSE for licence details.
 
-from typing import List, Optional
+from typing import List, Optional, Dict
+
+import os
+import re
 
 from hammer.vlsi import HammerSynthesisTool, HammerToolStep
 from hammer.vlsi import SynopsysTool
@@ -22,16 +25,28 @@ class DC(HammerSynthesisTool, SynopsysTool):
     def fill_outputs(self) -> bool:
         # Check that the mapped.v exists if the synthesis run was successful
         # TODO: move this check upwards?
-        mapped_v = "%s/results/%s.mapped.v" % (self.run_dir, self.top_module)
+        mapped_v = os.path.join(self.result_dir, self.top_module + ".mapped.v")
         if not os.path.isfile(mapped_v):
             raise ValueError("Output mapped verilog %s not found" % (mapped_v))  # better error?
         self.output_files = [mapped_v]
         return True
 
+    def tool_config_prefix(self) -> str:
+        return "synthesis.dc"
+
+    @property
+    def post_synth_sdc(self) -> Optional[str]:
+        return os.path.join(self.result_dir, self.top_module + ".mapped.sdc")
+
     @property
     def steps(self) -> List[HammerToolStep]:
         return self.make_steps_from_methods([
-            self.main_step
+            self.init_environment,
+            self.elaborate_design,
+            self.apply_constraints,
+            self.optimize_design,
+            self.generate_reports,
+            self.write_outputs,
         ])
 
     def tool_config_prefix(self) -> str:
@@ -90,21 +105,29 @@ class DC(HammerSynthesisTool, SynopsysTool):
         # Locate reference methodology tarball.
         synopsys_rm_tarball = self.get_synopsys_rm_tarball("DC")
 
-        # Locate DC binary.
-        dc_bin = self.get_setting("synthesis.dc.dc_bin")
-        if not os.path.isfile(dc_bin):
-            self.logger.error("DC binary not found as expected at {0}".format(dc_bin))
-            # TODO(edwardw): think about how to pass extra/more useful info like the specific type of error (e.g. FileNotFoundError)
-            return False
+        # Library setup
+        for db in self.timing_dbs:
+            if not os.path.exists(db):
+                self.logger.error("Cannot find %s" % db)
+                return False
+        self.append("set_app_var target_library \"%s\"" % ' '.join(self.timing_dbs))
+        self.append("set_app_var synthetic_library dw_foundation.sldb")
+        self.append("set_app_var link_library \"* $target_library $synthetic_library\"")
 
-        # Load input files.
-        if not self.check_input_files([".v", ".sv"]):
-            return False
+        # For designs that don't have tight QoR constraints and don't have register retiming,
+        # you can use the following variable to enable the highest productivity single pass flow.
+        # This flow modifies the optimizations to make verification easier.
+        # This variable setting should be applied prior to reading in the RTL for the design.
+        self.append("set_app_var simplified_verification_mode false")
+        self.append("set_svf results/%s.mapped.svf" % self.top_module)
 
-        input_files = list(self.input_files)  # type: List[str]
-        # Add any verilog_synth wrappers (which are needed in some technologies e.g. for SRAMs) which need to be
-        # synthesized.
-        input_files += self.technology.read_libs([
+        return True
+
+    def elaborate_design(self) -> bool:
+        # Add any verilog_synth wrappers
+        # (which are needed in some technologies e.g. for SRAMs)
+        # which need to be synthesized.
+        verilog = self.verilog + self.technology.read_libs([
             hammer_tech.filters.verilog_synth_filter
         ], HammerTechnologyUtils.to_plain_item)
 
@@ -166,10 +189,16 @@ class DC(HammerSynthesisTool, SynopsysTool):
         # TODO: think of a more elegant way to do this?
         HammerVLSILogging.enable_colour = False
         HammerVLSILogging.enable_tag = False
-        self.run_executable(args)  # TODO: check for errors and deal with them
+        dc_bin = os.path.basename(self.get_setting("synthesis.dc.dc_bin"))
+        dc_tcl = os.path.join(self.script_dir, "dc.tcl")
+        with open(dc_tcl, 'w') as _f:
+            _f.write('\n'.join(self.output))
+            _f.write('\nexit')
+        args = [dc_bin, "-64bit", "-f", dc_tcl]
+        # TODO: check outputs from lines?
+        lines = self.run_executable(args, self.run_dir)
         HammerVLSILogging.enable_colour = True
         HammerVLSILogging.enable_tag = True
         return True
-
 
 tool = DC
