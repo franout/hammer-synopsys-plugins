@@ -9,9 +9,9 @@ from typing import List
 
 import os
 
-import hammer_tech
-from hammer_tech import HammerTechnologyUtils
-from hammer_vlsi import SynopsysTool
+import hammer.tech
+from hammer.tech import HammerTechnologyUtils
+from hammer.common.synopsys import SynopsysTool
 
 #TODO: this probably needs to be just SynopsysTool
 class SynopsysCommon(SynopsysTool):
@@ -37,39 +37,39 @@ class SynopsysCommon(SynopsysTool):
     def timing_dbs(self) -> List[str]:
         # Gather/load libraries.
         return self.technology.read_libs(
-            [hammer_tech.filters.timing_db_filter],
+            [hammer.tech.filters.timing_db_filter],
             HammerTechnologyUtils.to_plain_item)
 
     @property
     def milkyway_lib_dirs(self) -> List[str]:
         return self.technology.read_libs(
-            [hammer_tech.filters.milkyway_lib_dir_filter],
+            [hammer.tech.filters.milkyway_lib_dir_filter],
             HammerTechnologyUtils.to_plain_item)
 
     @property
     def milkyway_techfiles(self) -> List[str]:
         return self.technology.read_libs(
-            [hammer_tech.filters.milkyway_techfile_filter],
+            [hammer.tech.filters.milkyway_techfile_filter],
             HammerTechnologyUtils.to_plain_item)
 
     @property
     def tlu_max_caps(self) -> List[str]:
         return self.technology.read_libs(
-            [hammer_tech.filters.tlu_max_cap_filter],
+            [hammer.tech.filters.tlu_max_cap_filter],
             HammerTechnologyUtils.to_plain_item)
 
     @property
     def tlu_min_caps(self) -> List[str]:
         return self.technology.read_libs(
-            [hammer_tech.filters.tlu_min_cap_filter],
+            [hammer.tech.filters.tlu_min_cap_filter],
             HammerTechnologyUtils.to_plain_item)
 
     @property
     def tlu_map(self) -> List[str]:
         return self.technology.read_libs(
-            [hammer_tech.filters.tlu_map_file_filter],
+            [hammer.tech.filters.tlu_map_file_filter],
             HammerTechnologyUtils.to_plain_item)
 
     @property
     def verilog(self) -> List[str]:
-        return [v for v in list(self.input_files) if v.endswith(".v")]
+        return [v for v in list(self.input_files) if v.endswith(".v") or v.endswith(".sv")]
