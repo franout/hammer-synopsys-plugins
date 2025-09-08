@@ -11,17 +11,12 @@ import os
 import re
 
 from hammer.vlsi import HammerSynthesisTool, HammerToolStep
-from hammer.vlsi import SynopsysTool
 from hammer.logging import HammerVLSILogging
-import hammer.tech as hammer_tech
+import hammer.tech
 from hammer.tech import HammerTechnologyUtils
+from .synopsys_common import SynopsysCommon
 
-import os
-import re
-from pathlib import Path
-import importlib.resources
-
-class DC(HammerSynthesisTool, SynopsysTool):
+class DC(HammerSynthesisTool, SynopsysCommon):
     def fill_outputs(self) -> bool:
         # Check that the mapped.v exists if the synthesis run was successful
         # TODO: move this check upwards?
@@ -44,66 +39,43 @@ class DC(HammerSynthesisTool, SynopsysTool):
             self.init_environment,
             self.elaborate_design,
             self.apply_constraints,
+            self.insert_dft,
             self.optimize_design,
             self.generate_reports,
+            self.generate_dft_reports,
             self.write_outputs,
         ])
 
-    def tool_config_prefix(self) -> str:
-        return "synthesis.dc"
+    def do_post_steps(self) -> bool:
+        assert super().do_post_steps()
+        return self.run_design_compiler()
 
-    # TODO(edwardw): move this to synopsys common
-    def generate_tcl_preferred_routing_direction(self):
+    @property
+    def output(self) -> List[str]:
         """
-        Generate a TCL fragment for setting preferred routing directions.
+        Buffered output to be put into dc.tcl.
         """
-        output = []
+        return self.attr_getter("_output", [])
 
-        # Suppress PSYN-882 ("Warning: Consecutive metal layers have the same preferred routing direction") while the layer routing is being built.
-        output.append("set suppress_errors  [concat $suppress_errors  [list PSYN-882]]")
-
-        # TODO This is broken with the API change to stackups ucb-bar/hammer#308
-        #for library in self.technology.config.libraries:
-        #    if library.metal_layers is not None:
-        #        for layer in library.metal_layers:
-        #            output.append("set_preferred_routing_direction -layers {{ {0} }} -direction {1}".format(layer.name, layer.preferred_routing_direction))
+    def append(self, cmd: str) -> None:
+        self.tcl_append(cmd, self.output)
 
 
-        output.append("set suppress_errors  [lminus $suppress_errors  [list PSYN-882]]")
-        output.append("")  # Add newline at the end
-        return "\n".join(output)
+    def init_environment(self) -> bool:
+        # The following setting removes new variable info messages from the end of the log file
+        self.append("set_app_var sh_new_variable_message false")
 
-    def disable_congestion_map(self) -> None:
-        """Disables the congestion map generation in rm_dc_scripts/dc.tcl since it requires a GUI and licences.
-        """
-        dc_tcl_path = os.path.join(self.run_dir, "rm_dc_scripts/dc.tcl")
+        # Actually use specified number of cores
+        self.append("set disable_multicore_resource_checks true")
+        self.append("set_host_options -max_cores %d" % self.get_setting("vlsi.core.max_threads"))
 
-        with open(dc_tcl_path) as f:
-            dc_tcl = f.read()
+        # Change alib_library_analysis_path to point to a central cache of analyzed libraries
+        # to save runtime and disk space.  The following setting only reflects the
+        # default value and should be changed to a central location for best results.
+        self.append("set_app_var alib_library_analysis_path alib")
 
-        congestion_map_fragment = """
-  # Use the following to generate and write out a congestion map from batch mode
-  # This requires a GUI session to be temporarily opened and closed so a valid DISPLAY
-  # must be set in your UNIX environment.
-
-  if {[info exists env(DISPLAY)]} {
-    gui_start
-"""
-        congestion_map_search = re.escape(congestion_map_fragment)
-        # We want to capture & replace that condition.
-        # Unfortunately, we can't replace within a group, so we'll have to replace around it.
-        # e.g. foobarbaz -> foo123baz requires (foo)bar(baz) -> \1 123 \2 -> foo123baz
-        cond = re.escape("[info exists env(DISPLAY)]")
-        congestion_map_search_and_capture = "(" + congestion_map_search.replace(cond, ")(" + cond + ")(") + ")"
-
-        output = re.sub(congestion_map_search_and_capture, "\g<1>false\g<3>", dc_tcl)
-
-        self.write_contents_to_path(output, dc_tcl_path)
-
-    def main_step(self) -> bool:
-        # TODO(edwardw): move most of this to Synopsys common since it's not DC-specific.
-        # Locate reference methodology tarball.
-        synopsys_rm_tarball = self.get_synopsys_rm_tarball("DC")
+        # Search Path Setup
+        self.append("set_app_var search_path \". %s $search_path\"" % self.result_dir)
 
         # Library setup
         for db in self.timing_dbs:
@@ -128,65 +100,148 @@ class DC(HammerSynthesisTool, SynopsysTool):
         # (which are needed in some technologies e.g. for SRAMs)
         # which need to be synthesized.
         verilog = self.verilog + self.technology.read_libs([
-            hammer_tech.filters.verilog_synth_filter
+            hammer.tech.filters.verilog_synth_filter
         ], HammerTechnologyUtils.to_plain_item)
+        for v in verilog:
+            if not os.path.exists(v):
+                self.logger.error("Cannot find %s" % v)
+                return False
+        # Read RTL
+        self.append("define_design_lib WORK -path ./WORK")
+        self.append("analyze -format sverilog \"%s\"" % ' '.join(verilog))
 
-        # Generate preferred_routing_directions.
-        preferred_routing_directions_fragment = os.path.join(self.run_dir, "preferred_routing_directions.tcl")
-        self.write_contents_to_path(self.generate_tcl_preferred_routing_direction(), preferred_routing_directions_fragment)
+        # Elaborate design
+        self.append("elaborate %s" % self.top_module)
+        
+        # Se the current design
+        self.append("current_design %s" % self.top_module)
 
-        # Generate clock constraints.
-        clock_constraints_fragment = os.path.join(self.run_dir, "clock_constraints_fragment.tcl")
-        self.write_contents_to_path(self.sdc_clock_constraints, clock_constraints_fragment)
+        # Link the design for possible unresolved errors
+        self.append("link")
 
-        # Get libraries.
-        lib_args = self.technology.read_libs([
-            hammer_tech.filters.timing_db_filter.copy(update={'tag': 'lib'}),
-            hammer_tech.filters.milkyway_lib_dir_filter.copy(update={'tag': "milkyway"}),
-            hammer_tech.filters.tlu_max_cap_filter.copy(update={'tag': "tlu_max"}),
-            hammer_tech.filters.tlu_min_cap_filter.copy(update={'tag': "tlu_min"}),
-            hammer_tech.filters.tlu_map_file_filter.copy(update={'tag': "tlu_map"}),
-            hammer_tech.filters.milkyway_techfile_filter.copy(update={'tag': "tf"})
-        ], HammerTechnologyUtils.to_command_line_args)
+        # Set Rams as black boxes
+        #self.append("foreach_in_collection ram [get_designs *ram*] \{ ")
+        #self.append("set_attribute $ram is_black_box true")
+        #self.append("\} ")
+        return True
 
-        # Pre-extract the tarball (so that we can make TCL modifications in Python)
-        self.run_executable([
-            "tar", "-xf", synopsys_rm_tarball, "-C", self.run_dir, "--strip-components=1"
-        ])
+    def apply_constraints(self) -> bool:
+        # Generate clock
+        clocks = [clock.name for clock in self.get_clock_ports()]
+        self.append(self.sdc_clock_constraints)
 
-        # Disable the DC congestion map if needed.
-        if not self.get_setting("synthesis.dc.enable_congestion_map"):
-            self.disable_congestion_map()
+        # Set ungroup
+        for module in self.get_setting('vlsi.inputs.no_ungroup'):
+            self.append("set_ungroup [get_designs %s] false" % module)
 
-        compile_args = self.get_setting("synthesis.dc.compile_args")
-        if not compile_args:
-          compile_args = []
+        # Set retmining
+        for module in self.get_setting("vlsi.inputs.retimed_modules"):
+            self.append(' '.join([
+                "set_optimize_registers", "true",
+                "-design", module,
+                "-clock", "{%s}" % ' '.join(clocks)
+            ] + self.get_setting("synthesis.dc.retiming_args")))
 
-        # Build args.
-        syn_script_path = Path(self.technology.cache_dir) / "run-synthesis"
-        syn_script_txt = importlib.resources.files("hammer.synthesis.dc.tools").joinpath("run-synthesis").read_text()
-        syn_script_path.write_text(syn_script_txt)
+        # Create Default Path Groups
+        self.append("""
+set ports_clock_root [filter_collection [get_attribute [get_clocks] sources] object_class==port]
+group_path -name REGOUT -to [all_outputs]
+group_path -name REGIN -from [remove_from_collection [all_inputs] ${ports_clock_root}]
+group_path -name FEEDTHROUGH -from [remove_from_collection [all_inputs] ${ports_clock_root}] -to [all_outputs]
+""")
+        # Prevent assignment statements in the Verilog netlist.
+        self.append("set_fix_multiple_port_nets -all -buffer_constants")
 
-        tcl_path = Path(self.technology.cache_dir) / "find_regs.tcl"
-        tcl_txt = importlib.resources.files("hammer.synthesis.dc.tools").joinpath("find_regs.tcl").read_text()
-        tcl_path.write_text(tcl_txt)
+        return True
 
-        args = [
-            syn_script_path,
-            "--dc", dc_bin,
-            "--clock_constraints_fragment", clock_constraints_fragment,
-            "--preferred_routing_directions_fragment", preferred_routing_directions_fragment,
-            "--find_regs_tcl", tcl_path,
-            "--run_dir", self.run_dir,
-            "--top", self.top_module
-        ]
-        args.extend(input_files)  # We asserted these are Verilog above
-        args.extend(lib_args)
-        for compile_arg in compile_args:
-          args.extend(["--compile_arg", compile_arg])
 
-        # Temporarily disable colours/tag to make DC run output more readable.
-        # TODO: think of a more elegant way to do this?
+    def optimize_design(self) -> bool:
+        # Optimize design
+        self.append("compile_ultra %s" % ' '.join(self.get_setting("synthesis.dc.compile_args")))
+        self.append("change_names -rules verilog -hierarchy")
+        # Write and close SVF file and make it available for immediate use
+        self.append("set_svf -off")
+        return True
+
+    def generate_reports(self) -> bool:
+        self.append("""
+report_reference -hierarchy > \\
+    {report_dir}/{design_name}.mapped.report_reference.out
+report_qor > \\
+    {report_dir}/{design_name}.mapped.qor.rpt
+report_area -nosplit > \\
+    {report_dir}/{design_name}.mapped.area.rpt
+report_timing -max_paths 500 -nworst 10 -input_pins -capacitance \\
+    -significant_digits 4 -transition_time -nets -attributes -nosplit > \\
+    {report_dir}/{design_name}.mapped.timing.rpt
+
+report_power -nosplit > \\
+    {report_dir}/{design_name}.mapped.power.rpt
+report_clock_gating -nosplit > \\
+    {report_dir}/{design_name}.mapped.clock_gating.rpt
+""".format(report_dir=self.report_dir, design_name=self.top_module))
+        return True
+
+    def write_outputs(self) -> bool:
+        self.append("""
+write -format verilog -hierarchy -output \\
+    {result_dir}/{design_name}.mapped.v
+write -format ddc -hierarchy -output \\
+    {result_dir}/{design_name}.mapped.ddc
+write_sdc -nosplit \\
+    {result_dir}/{design_name}.mapped.sdc
+""".format(result_dir=self.result_dir, design_name=self.top_module))
+        return True
+
+    def generate_dft_reports(self) -> bool:
+        self.append("""
+write_test_protocol -output {result_dir}/{design_name}_test_protocol.spf
+""".format(result_dir=self.result_dir, design_name=self.top_module))
+        self.append("""
+write_scan_def -output {result_dir}/{design_name}_report_dft.scandef
+""".format(result_dir=self.result_dir, design_name=self.top_module))
+        
+        return True
+
+    def insert_dft(self) -> bool:
+        clocks = [clock.name for clock in self.get_clock_ports()]
+        resets = [reset.name for reset in self.get_reset_ports()]
+        self.append("set compile_timing_high_effort true")
+        self.append("set compile_delete_unloaded_sequential_cells true")
+        self.append("set_scan_configuration -style multiplexed_flip_flop")
+        self.append("compile -scan  -gate_clock -area_effor medium -map_effort medium")
+        self.append("set_scan_configuration -chain_count 1  -create_test_clocks_by_system_clock_domain true")
+        self.append("""
+set_dft_signal -view existing_dft -type ScanClock -port {clock}  -timing [list 45 95] -active_state 1 -connect_to {clock}
+""".format(clock=clocks[0]))
+        self.append("create_port test_si -direction in")
+        self.append("create_port test_se -direction in")
+        self.append("create_port test_so -direction out")
+        self.append("""
+set_dft_signal -view spec -type Reset -port {reset} -active_state 1
+""".format(reset=resets[0]))
+        self.append("set_dft_signal -view spec -type ScanDataIn -port test_si ")
+        self.append("set_dft_signal -view spec -type ScanDataOut -port test_so")
+        self.append("set_dft_signal -view spec -type ScanEnable -port test_se -active_state 1")
+        self.append("create_test_protocol")
+        self.append("dft_drc -verbose")
+        self.append("preview_dft")
+        self.append("insert_dft")
+        self.append("check_scan")
+        self.append("dft_drc")
+        self.append("check_design")
+        
+        return True
+
+    @property
+    def env_vars(self) -> Dict[str, str]:
+        env = dict(super().env_vars)
+        env["PATH"] = "%s:%s" % (
+            os.path.dirname(self.get_setting("synthesis.dc.dc_bin")),
+            os.environ["PATH"])
+        return env
+
+    def run_design_compiler(self) -> bool:
         HammerVLSILogging.enable_colour = False
         HammerVLSILogging.enable_tag = False
         dc_bin = os.path.basename(self.get_setting("synthesis.dc.dc_bin"))
