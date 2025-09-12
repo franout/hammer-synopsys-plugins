@@ -6,7 +6,7 @@
 #  See LICENSE for license details.
 
 from hammer.vlsi import HammerSimTool, HammerToolStep, HammerLSFSubmitCommand, HammerLSFSettings
-from hammer.vlsi import SynopsysTool
+from hammer.common.synopsys import SynopsysTool
 from hammer.logging import HammerVLSILogging
 
 from typing import Dict, List, Optional, Callable, Tuple
