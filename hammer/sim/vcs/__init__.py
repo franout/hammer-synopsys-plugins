@@ -103,7 +103,8 @@ class VCS(HammerSimTool, SynopsysTool):
                 seq_json = json.load(seq_file)
                 assert isinstance(seq_json, List), "list of all sequential cells should be a json list of strings not {}".format(type(seq_json))
                 for cell in seq_json:
-                    f.write("acc=wn:{cell_name}\n".format(cell_name=cell))
+                    cell_name = cell.split("[")[0] # To avoid multi bit regs
+                    f.write("acc=wn:{cell_name}\n".format(cell_name=cell_name))
 
         abspath_all_regs = os.path.join(os.getcwd(), self.all_regs)
         if not os.path.isfile(abspath_all_regs):
@@ -117,7 +118,7 @@ class VCS(HammerSimTool, SynopsysTool):
                     path = reg["path"]
                     path = '.'.join(path.split('/'))
                     pin = reg["pin"]
-                    f.write("force -deposit {" + tb_prefix + "." + path + " ." + pin + "} " + str(force_val) + "\n")
+                    f.write("force -deposit {" + tb_prefix + "." + path + "." + pin + "} " + str(force_val) + "\n")
 
         return True
 
