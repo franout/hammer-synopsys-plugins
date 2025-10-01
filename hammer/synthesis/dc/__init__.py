@@ -5,7 +5,7 @@
 #
 #  See LICENSE for licence details.
 
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
 import os
 import re
@@ -18,20 +18,88 @@ from .synopsys_common import SynopsysCommon
 
 class DC(HammerSynthesisTool, SynopsysCommon):
     def fill_outputs(self) -> bool:
+        # Check that the regs paths were written properly if the write_regs step was run
+        self.output_seq_cells = self.all_cells_path
+        self.output_all_regs = self.all_regs_path
+        if self.ran_write_regs:
+            if not os.path.isfile(self.all_cells_path):
+                raise ValueError("Output find_regs_cells.json %s not found" % (self.all_cells_path))
+
+            if not os.path.isfile(self.all_regs_path):
+                raise ValueError("Output find_regs_paths.json %s not found" % (self.all_regs_path))
+
+            if not self.process_reg_paths(self.all_regs_path):
+                self.logger.error("Failed to process all register paths")
+        else:
+            self.logger.info("Did not run write_regs")
         # Check that the mapped.v exists if the synthesis run was successful
         # TODO: move this check upwards?
         mapped_v = os.path.join(self.result_dir, self.top_module + ".mapped.v")
         if not os.path.isfile(mapped_v):
             raise ValueError("Output mapped verilog %s not found" % (mapped_v))  # better error?
         self.output_files = [mapped_v]
+        # DC does not 
+        self.output_sdc = self.post_synth_sdc
+        self.sdf_file = self.output_sdf_path
+        if self.ran_write_outputs:
+            if not os.path.isfile(mapped_v):
+                raise ValueError("Output mapped verilog %s not found" % (mapped_v)) # better error?
+
+            if not os.path.isfile(self.output_sdc):
+                self.logger.warning("Output SDC %s not found" % (self.mapped_sdc_path)) # better error?
+
+            if not os.path.isfile(self.output_sdf_path):
+                self.logger.warning("Output SDF %s not found" % (self.output_sdf_path))
+        else:
+            self.logger.info("Did not run write_outputs")
+
         return True
 
     def tool_config_prefix(self) -> str:
         return "synthesis.dc"
 
     @property
+    def all_regs_path(self) -> str:
+        return os.path.join(self.run_dir, "find_regs_paths.json")
+
+    @property
+    def all_cells_path(self) -> str:
+        return os.path.join(self.run_dir, "find_regs_cells.json")
+
+    @property
+    def ran_write_regs(self) -> bool:
+        """The write_regs step sets this to True if it was run."""
+        return self.attr_getter("_ran_write_regs", False)
+
+    @ran_write_regs.setter
+    def ran_write_regs(self, val: bool) -> None:
+        self.attr_setter("_ran_write_regs", val)
+    
+    @property
+    def ran_write_outputs(self) -> bool:
+        """The write_ouputs step sets this to True if it was run."""
+        return self.attr_getter("_ran_write_outputs", False)
+
+    @ran_write_outputs.setter
+    def ran_write_outputs(self, val: bool) -> None:
+        self.attr_setter("_ran_write_outputs", val)
+
+    def export_config_outputs(self) -> Dict[str, Any]:
+        outputs = dict(super().export_config_outputs())
+        # TODO(edwardw): find a "safer" way of passing around these settings keys.
+        outputs["synthesis.outputs.sdc"] = self.output_sdc
+        outputs["synthesis.outputs.seq_cells"] = self.output_seq_cells
+        outputs["synthesis.outputs.all_regs"] = self.output_all_regs
+        outputs["synthesis.outputs.sdf_file"] = self.output_sdf_path
+        return outputs
+    
+    @property
     def post_synth_sdc(self) -> Optional[str]:
         return os.path.join(self.result_dir, self.top_module + ".mapped.sdc")
+    
+    @property
+    def output_sdf_path(self) -> str:
+        return os.path.join(self.run_dir, "{top}.mapped.sdf".format(top=self.top_module)) 
 
     @property
     def steps(self) -> List[HammerToolStep]:
@@ -44,6 +112,7 @@ class DC(HammerSynthesisTool, SynopsysCommon):
             self.generate_reports,
             self.generate_dft_reports,
             self.write_outputs,
+            self.write_regs,
         ])
 
     def do_post_steps(self) -> bool:
@@ -191,6 +260,7 @@ write -format ddc -hierarchy -output \\
 write_sdc -nosplit \\
     {result_dir}/{design_name}.mapped.sdc
 """.format(result_dir=self.result_dir, design_name=self.top_module))
+        self.ran_write_outputs = True 
         return True
 
     def generate_dft_reports(self) -> bool:
@@ -201,6 +271,14 @@ write_test_protocol -output {result_dir}/{design_name}_test_protocol.spf
 write_scan_def -output {result_dir}/{design_name}_report_dft.scandef
 """.format(result_dir=self.result_dir, design_name=self.top_module))
         
+        return True
+
+    def write_regs(self) -> bool:
+        """write regs info to be read in for simulation register forcing"""
+        if self.hierarchical_mode.is_nonleaf_hierarchical():
+            self.append(self.child_modules_tcl())
+        self.append(self.write_regs_tcl())
+        self.ran_write_regs = True
         return True
 
     def insert_dft(self) -> bool:
