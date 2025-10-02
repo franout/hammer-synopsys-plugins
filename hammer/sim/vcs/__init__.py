@@ -134,6 +134,10 @@ class VCS(HammerSimTool, SynopsysTool):
 
         # We are switching working directories and we still need to find paths
         abspath_input_files = list(map(lambda name: os.path.join(os.getcwd(), name), self.input_files))
+        for v in abspath_input_files:
+            if not os.path.exists(v):
+                self.logger.error("Cannot find %s" % v)
+                return False
 
         top_module = self.top_module
         compiler_cc_opts = self.get_setting("sim.inputs.compiler_cc_opts", [])
@@ -153,6 +157,14 @@ class VCS(HammerSimTool, SynopsysTool):
           "-debug_access+all" # since I-2014.03, req'd for FSDB dumping & force regs
         ]
 
+        use_gui = self.get_setting("sim.gui")
+        if use_gui:
+            verdi_home = self.get_setting("sim.vcs.verdi_home")
+            if not os.path.exists(verdi_home):
+                self.logger.error("VERDI home not found as expected at {0}".format(verdi_home))
+                return False
+            args.append("-kdb")
+        
         if self.get_setting("sim.vcs.fgp") and self.version() >= self.version_number("M-2017.03"):
             args.append("-fgp")
 
@@ -326,6 +338,15 @@ class VCS(HammerSimTool, SynopsysTool):
 
         # setup simulation arguments
         args = [ self.simulator_executable_path ]
+
+        use_gui = self.get_setting("sim.gui")
+        if use_gui:
+            verdi_home = self.get_setting("sim.vcs.verdi_home")
+            if not os.path.exists(verdi_home):
+                self.logger.error("VERDI home not found as expected at {0}".format(verdi_home))
+                return False
+            args.append("-gui")
+
         args.extend(exec_flags_prepend)
         if self.get_setting("sim.vcs.fgp") and self.version() >= self.version_number("M-2017.03"):
             # num_threads is in addition to a master thread, so reduce by 1
