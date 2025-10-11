@@ -284,6 +284,7 @@ write_scan_def -output {result_dir}/{design_name}_report_dft.scandef
     def insert_dft(self) -> bool:
         clocks = [clock.name for clock in self.get_clock_ports()]
         resets = [reset.name for reset in self.get_reset_ports()]
+        reset_active_negated = [0 if reset.active_negated else 1 for reset in self.get_reset_ports()]
         self.append("set compile_timing_high_effort true")
         self.append("set compile_delete_unloaded_sequential_cells true")
         self.append("set_scan_configuration -style multiplexed_flip_flop")
@@ -296,8 +297,8 @@ set_dft_signal -view existing_dft -type ScanClock -port {clock}  -timing [list 4
         self.append("create_port test_se -direction in")
         self.append("create_port test_so -direction out")
         self.append("""
-set_dft_signal -view spec -type Reset -port {reset} -active_state 1
-""".format(reset=resets[0]))
+set_dft_signal -view spec -type Reset -port {reset} -active_state {state}
+""".format(reset=resets[0],state=reset_active_negated[0]))
         self.append("set_dft_signal -view spec -type ScanDataIn -port test_si ")
         self.append("set_dft_signal -view spec -type ScanDataOut -port test_so")
         self.append("set_dft_signal -view spec -type ScanEnable -port test_se -active_state 1")
